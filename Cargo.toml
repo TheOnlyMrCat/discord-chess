@@ -1,0 +1,17 @@
+[package]
+name = "discord_chess"
+version = "0.1.0"
+authors = ["TheOnlyMrCat <signupforforums5@gmail.com>"]
+edition = "2018"
+license = "MIT"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+serenity = "0.8.3"
+lazy_static = "1.4.0"
+chess = "3.1.1"
+rand = "0.7"
+regex = "1"
+raster = "0.2.0"
+png = "0.16.2"
