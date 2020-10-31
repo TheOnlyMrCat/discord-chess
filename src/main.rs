@@ -156,6 +156,9 @@ fn main() {
 	lazy_static::initialize(&QUEENS_IMG);
 	lazy_static::initialize(&KINGS_IMG);
 
+	lazy_static::initialize(&YELLOW_SQUARE);
+	lazy_static::initialize(&RED_SQUARE);
+
 	println!(" Done.");
 
 	let mut client = Client::new(std::env::var("DISCORD_TOKEN").unwrap(), Handler).expect("Error creating client");
@@ -207,6 +210,12 @@ fn post_board(ctx: &Context, gm: &mut ChannelGame, ch: &GuildChannel) -> Command
 					board = raster::editor::blend(&board, &YELLOW_SQUARE, BlendMode::Normal, 1.0, PositionMode::TopLeft, (40 + posx * 80) as i32, (40 + posy * 80) as i32).unwrap();
 				}
 			}
+
+			if gm.game.current_position().checkers().popcnt() > 0 {
+				if square == gm.game.current_position().king_square(gm.game.side_to_move()) {
+					board = raster::editor::blend(&board, &RED_SQUARE, BlendMode::Normal, 1.0, PositionMode::TopLeft, (40 + posx * 80) as i32, (40 + posy * 80) as i32).unwrap();
+				}
+			}
 			
 			if let Some(piece) = gm.game.current_position().piece_on(square) {
 				let (mut piece_img, white_ctr, black_ctr) = match piece {
@@ -214,7 +223,7 @@ fn post_board(ctx: &Context, gm: &mut ChannelGame, ch: &GuildChannel) -> Command
 					Piece::Knight => (KNIGHTS_IMG.clone(), 45, 120),
 					Piece::Bishop => (BISHOPS_IMG.clone(), 43, 118),
 					Piece::Rook => (ROOKS_IMG.clone(), 45, 116),
-					Piece::Queen => (QUEENS_IMG.clone(), 42, 120),
+					Piece::Queen => (QUEENS_IMG.clone(), 41, 120),
 					Piece::King => (KINGS_IMG.clone(), 42, 118),
 				};
 				raster::editor::crop(
