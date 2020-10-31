@@ -8,13 +8,16 @@ extern crate rand;
 extern crate png;
 
 use std::collections::{HashSet,HashMap};
-use std::sync::Mutex;
+use std::sync::{RwLock,Mutex};
 use std::borrow::Cow;
 
 use serenity::{
 	client::Client,
 	model::{
-		channel::Message,
+		channel::{
+			Message,
+			GuildChannel
+		},
 		gateway::Ready,
 		id::{
 			ChannelId,
@@ -27,12 +30,12 @@ use serenity::{
 		CommandResult,
 		Args,
 		Delimiter,
-		CommandOptions,
-		CheckResult,
+		HelpOptions,
+		CommandGroup,
 		macros::{
 			command,
 			group,
-			check
+			help
 		}
 	},
 	http::AttachmentType,
@@ -51,22 +54,33 @@ use game::*;
 
 lazy_static! {
 	static ref CONFIG: Config = Config {
-		guild_settings: Mutex::new(HashMap::<_, _>::new()),
-		user_prefs: Mutex::new(HashMap::<_, _>::new())
+		guild_settings: RwLock::new(HashMap::<_, _>::new()),
+		user_prefs: RwLock::new(HashMap::<_, _>::new())
 	};
 
 	static ref GAMES: Mutex<HashMap<ChannelId, ChannelGame>> = Mutex::new(HashMap::<_, _>::new());
 
-	static ref BOARD_IMG: Image = raster::open("res/board_annotated_white.png").unwrap();
+	static ref BOARD_IMG_WHITE: Image = raster::open("res/board_annotated_white.png").unwrap();
+	static ref BOARD_IMG_BLACK: Image = raster::open("res/board_annotated_black.png").unwrap();
 	static ref PIECES_IMG: Image = raster::open("res/pieces.png").unwrap();
 }
 
 #[group]
-#[commands(play, accept, decline, cancel, board, preferences)]
+#[help_available]
+#[only_in(guilds)]
+#[commands(play, accept, decline, cancel, preferences)]
 struct General;
 
 #[group]
-#[checks(Perms)]
+#[help_available]
+#[only_in(guilds)]
+#[commands(board, draw, resign)]
+struct Game;
+
+#[group]
+#[help_available]
+#[only_in(guilds)]
+#[required_permissions(manage_channels)]
 #[commands(enable, disable, config, permissions)]
 struct Managerial;
 
@@ -99,7 +113,8 @@ impl EventHandler for Handler {
 						Err(_) => { msg.reply(ctx, format!("Illegal move: {}", msg.content)).unwrap(); }
 						Ok(mv) => {
 							gm.game.make_move(mv);
-							post_board(&ctx, gm, msg.channel_id).unwrap();
+							gm.draw_offer = None;
+							post_board(&ctx, gm, &msg.channel(&ctx).unwrap().guild().unwrap().read()).unwrap();
 						}
 					}
 				}
@@ -109,8 +124,13 @@ impl EventHandler for Handler {
 }
 
 fn main() {
-	lazy_static::initialize(&BOARD_IMG);
+	use std::io::Write;
+	print!("Loading images...");
+	std::io::stdout().lock().flush().unwrap();
+	lazy_static::initialize(&BOARD_IMG_WHITE);
+	lazy_static::initialize(&BOARD_IMG_BLACK);
 	lazy_static::initialize(&PIECES_IMG);
+	println!(" Done.");
 
 	let mut client = Client::new(std::env::var("DISCORD_TOKEN").unwrap(), Handler).expect("Error creating client");
 
@@ -124,27 +144,31 @@ fn main() {
 		Err(why) => panic!("Could not access application info: {:?}", why),
 	};
 
-	client.with_framework(StandardFramework::new().configure(|c| c.prefix("c>").on_mention(Some(bot_id)).owners(owners)).group(&GENERAL_GROUP).group(&MANAGERIAL_GROUP).group(&OWNER_GROUP));
+	client.with_framework(StandardFramework::new().configure(|c| c.prefix("c>").on_mention(Some(bot_id)).owners(owners)).group(&GENERAL_GROUP).group(&GAME_GROUP).group(&MANAGERIAL_GROUP).group(&OWNER_GROUP).help(&MAIN_HELP));
 
 	if let Err(reason) = client.start() {
 		panic!("An error occured when starting the client: {:?}", reason);
 	}
 }
 
-fn post_board(ctx: &Context, gm: &mut ChannelGame, ch: ChannelId) -> CommandResult {
-	const RANK_INDEX: [Rank; 8] = [Rank::Eighth, Rank::Seventh, Rank::Sixth, Rank::Fifth, Rank::Fourth, Rank::Third, Rank::Second, Rank::First];
-	const FILE_INDEX: [File; 8] = [File::A, File::B, File::C, File::D, File::E, File::F, File::G, File::H];
-
-	const BASE_OFFSET: i32 = 5;
-	const PIECE_OFFSET: i32 = 95;
-	const WHITE_OFFSET: i32 = 80;
+fn post_board(ctx: &Context, gm: &mut ChannelGame, ch: &GuildChannel) -> CommandResult {
+	CONFIG.lazy_guild(ch.guild_id);
+	CONFIG.lazy_user(gm.black);
 
 	ch.broadcast_typing(ctx)?;
 
-	let mut board = BOARD_IMG.clone();
+	let use_black = gm.game.side_to_move() == Color::Black && CONFIG.user_prefs.read().unwrap().get(&gm.black).unwrap().settings.get("flipIfBlack").unwrap().parse::<bool>().unwrap_or(false);
+	let mut board = if use_black { BOARD_IMG_BLACK.clone() } else { BOARD_IMG_WHITE.clone() };
 
 	for y in 0..=7 {
 		for x in 0..=7 {
+			const RANK_INDEX: [Rank; 8] = [Rank::Eighth, Rank::Seventh, Rank::Sixth, Rank::Fifth, Rank::Fourth, Rank::Third, Rank::Second, Rank::First];
+			const FILE_INDEX: [File; 8] = [File::A, File::B, File::C, File::D, File::E, File::F, File::G, File::H];
+
+			const BASE_OFFSET: i32 = 5;
+			const PIECE_OFFSET: i32 = 95;
+			const WHITE_OFFSET: i32 = 80;
+
 			let square = Square::make_square(RANK_INDEX[y], FILE_INDEX[x]);
 			if let Some(piece) = gm.game.current_position().piece_on(square) {
 				let mut piece_img = PIECES_IMG.clone();
@@ -157,25 +181,39 @@ fn post_board(ctx: &Context, gm: &mut ChannelGame, ch: ChannelId) -> CommandResu
 					Piece::Pawn => 5
 				}), if gm.game.current_position().color_on(square) == Some(Color::White) { WHITE_OFFSET } else { 0 }).unwrap();
 				raster::editor::resize(&mut piece_img, 80, 80, ResizeMode::Exact).unwrap();
-				board = raster::editor::blend(&board, &piece_img, BlendMode::Normal, 1.0, PositionMode::TopLeft, (40 + x * 80) as i32, (40 + y * 80) as i32).unwrap();
+				let posx: usize;
+				let posy: usize;
+				if use_black {
+					posx = 7 - x;
+					posy = 7 - y;
+				} else {
+					posx = x;
+					posy = y;
+				}
+				board = raster::editor::blend(&board, &piece_img, BlendMode::Normal, 1.0, PositionMode::TopLeft, (40 + posx * 80) as i32, (40 + posy * 80) as i32).unwrap();
 			}
 		}
 	}
 
 	println!("Encoding image");
-	let mut bytes = Vec::<u8>::new();
-	{
-		let mut encoder = png::Encoder::new(&mut bytes, board.width as u32, board.height as u32);
-		encoder.set_color(png::ColorType::RGBA);
-		encoder.set_depth(png::BitDepth::Eight);
+	let bytes = {
+		use png::{Encoder, Compression, ColorType, BitDepth};
+
+		let mut bytes = Vec::<u8>::new();
+		let mut encoder = Encoder::new(&mut bytes, board.width as u32, board.height as u32);
+		encoder.set_color(ColorType::RGBA);
+		encoder.set_depth(BitDepth::Eight);
+		encoder.set_compression(Compression::Fast);
+
 		let mut writer = encoder.write_header().unwrap();
-		if let Err(err) = writer.write_image_data(&board.bytes) {
-			panic!(err);
-		}
-	}
+		writer.write_image_data(&board.bytes).unwrap();
+		std::mem::drop(writer);
+
+		bytes
+	};
 
 	println!("Sending board...");
-	ch.send_message(
+	let sent = ch.send_message(
 		ctx,
 		|c| {
 			c
@@ -195,22 +233,61 @@ fn post_board(ctx: &Context, gm: &mut ChannelGame, ch: ChannelId) -> CommandResu
 				gm.finished = true;
 			} else {
 				if gm.game.can_declare_draw() {
-					c.content(" can declare draw");
+					c.content(format!("{} to play can declare draw", match gm.game.side_to_move() { Color::White => "White", Color::Black => "Black" }));
 				}
 			}
 			c
 		}
-	)?;
+	)?.id;
+	match &**CONFIG.guild_settings.read().unwrap().get(&ch.guild_id).unwrap().settings.get("deleteOld").unwrap() {
+		"onNext" => {
+			if let Some(b) = gm.old_boards.pop_front() {
+				ch.delete_messages(ctx, vec![b])?;
+			}
+			gm.old_boards.push_back(sent);
+		}
+		"onEnd" | "onRequest" => {
+			if gm.old_boards.len() >= 100 {
+				ch.delete_messages(ctx, vec![gm.old_boards.pop_front().unwrap()])?;
+			}
+			gm.old_boards.push_back(sent);
+		}
+		"off" => {}
+		_ => {
+			panic!("Unexpected value for deleteOld");
+		}
+	}
 	println!("Sent");
 
 	Ok(())
 }
 
+fn check_perm(msg: &Message, perm: &str) -> CommandResult {
+	CONFIG.lazy_guild(msg.guild_id.unwrap());
+	match CONFIG.guild_settings.read().unwrap().get(&msg.guild_id.unwrap()).unwrap().get_perm(perm.to_string(), msg.author.id, msg.channel_id) {
+		Some((true, _)) => Ok(()),
+		_ => Err("Lack of required permissions".into())
+	}
+}
+
+#[help]
+fn main_help(
+	ctx: &mut Context,
+	msg: &Message,
+	args: Args,
+	help_options: &'static HelpOptions,
+	groups: &[&'static CommandGroup],
+	owners: HashSet<UserId>) -> CommandResult
+{
+	serenity::framework::standard::help_commands::with_embeds(ctx, msg, args, help_options, groups, owners)
+}
+
 #[command]
 fn play(ctx: &mut Context, msg: &Message) -> CommandResult {
+	check_perm(msg, "chess.games.allow")?;
 	let mut gs = GAMES.lock().unwrap();
 
-	if gs.contains_key(&msg.channel_id) && !gs.get(&msg.channel_id).expect("Short circuit").finished {
+	if let Some(ChannelGame { finished: false, .. }) = gs.get(&msg.channel_id) {
 		msg.reply(ctx, "There's already a game going on here!")?;
 	} else {
 		let mut args = Args::new(&msg.content, &[Delimiter::Single(' ')]);
@@ -228,7 +305,7 @@ fn play(ctx: &mut Context, msg: &Message) -> CommandResult {
 			});
 			msg.reply(ctx, format!("I've set up your game. You're playing as {}", if worb { "White" } else { "Black" }))?;
 		} else {
-			msg.reply(ctx, "Who are you playing against?")?;
+			msg.reply(ctx, "Who are you playing against? (`c>play @someone`)")?;
 		}
 	}
 
@@ -239,20 +316,20 @@ fn play(ctx: &mut Context, msg: &Message) -> CommandResult {
 fn accept(ctx: &mut Context, msg: &Message) -> CommandResult {
 	let mut gs = GAMES.lock().unwrap();
 
-	if !gs.contains_key(&msg.channel_id) || gs.get(&msg.channel_id).expect("Short circuit").finished {
-		msg.reply(ctx, "No one has started a game in this channel")?;
-	} else {
+	if let Some(ChannelGame { running: false, finished: false, ..}) = gs.get(&msg.channel_id) {
 		let mut gm = gs.get_mut(&msg.channel_id).unwrap();
 		if !gm.running {
 			if msg.author.id == gm.get_other() {
 				gm.running = true;
-				post_board(ctx, gm, msg.channel_id)?;
+				post_board(ctx, gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
 			} else {
 				msg.reply(ctx, "You weren't asked to play")?;
 			}
 		} else {
 			msg.reply(ctx, "The game has already started")?;
 		}
+	} else {
+		msg.reply(ctx, "No one has started a game in this channel")?;
 	}
 
 	Ok(())
@@ -262,9 +339,7 @@ fn accept(ctx: &mut Context, msg: &Message) -> CommandResult {
 fn decline(ctx: &mut Context, msg: &Message) -> CommandResult {
 	let mut gs = GAMES.lock().unwrap();
 
-	if !gs.contains_key(&msg.channel_id) || gs.get(&msg.channel_id).expect("Short circuit").finished {
-		msg.reply(ctx, "No one has started a game in this channel")?;
-	} else {
+	if let Some(ChannelGame { running: false, finished: false, ..}) = gs.get(&msg.channel_id) {
 		let gm = gs.get(&msg.channel_id).unwrap();
 		if !gm.running {
 			if msg.author.id == gm.get_other() {
@@ -276,6 +351,8 @@ fn decline(ctx: &mut Context, msg: &Message) -> CommandResult {
 		} else {
 			msg.reply(ctx, "The game has already started")?;
 		}
+	} else {
+		msg.reply(ctx, "No one has started a game in this channel")?;
 	}
 
 	Ok(())
@@ -285,9 +362,7 @@ fn decline(ctx: &mut Context, msg: &Message) -> CommandResult {
 fn cancel(ctx: &mut Context, msg: &Message) -> CommandResult {
 	let mut gs = GAMES.lock().unwrap();
 
-	if !gs.contains_key(&msg.channel_id) || gs.get(&msg.channel_id).expect("Short circuit").finished {
-		msg.reply(ctx, "No one has started a game in this channel")?;
-	} else {
+	if let Some(ChannelGame { running: false, finished: false, ..}) = gs.get(&msg.channel_id) {
 		let gm = gs.get(&msg.channel_id).unwrap();
 		if !gm.running {
 			if msg.author.id == gm.get_initiator() {
@@ -299,6 +374,8 @@ fn cancel(ctx: &mut Context, msg: &Message) -> CommandResult {
 		} else {
 			msg.reply(ctx, "The game has already started")?;
 		}
+	} else {
+		msg.reply(ctx, "No one has started a game in this channel")?;
 	}
 
 	Ok(())
@@ -313,7 +390,7 @@ fn board(ctx: &mut Context, msg: &Message) -> CommandResult {
 	} else {
 		let mut gm = gs.get_mut(&msg.channel_id).unwrap();
 		if gm.running || gm.finished {
-			post_board(ctx, &mut gm, msg.channel_id)?;
+			post_board(ctx, &mut gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
 		} else {
 			msg.reply(ctx, "The game hasn't been accepted yet")?;
 		}
@@ -322,21 +399,88 @@ fn board(ctx: &mut Context, msg: &Message) -> CommandResult {
 	Ok(())
 }
 
-#[check]
-#[name = "Perms"]
-fn permission_check(ctx: &mut Context, msg: &Message, _: &mut Args, _: &CommandOptions) -> CheckResult {
-	if let Some(member) = msg.member(&ctx.cache) {
-		if let Ok(permissions) = member.permissions(&ctx.cache) {
-			return permissions.manage_channels().into();
+#[command]
+fn resign(ctx: &mut Context, msg: &Message) -> CommandResult {
+	let mut gs = GAMES.lock().unwrap();
+
+	if !gs.contains_key(&msg.channel_id) {
+		msg.reply(ctx, "No one has started a game in this channel")?;
+	} else {
+		let gm = gs.get_mut(&msg.channel_id).unwrap();
+		if gm.running {
+			if msg.author.id == gm.white {
+				gm.game.resign(Color::White);
+				post_board(ctx, gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
+			} else if msg.author.id == gm.black {
+				gm.game.resign(Color::Black);
+				post_board(ctx, gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
+			} else {
+				msg.reply(ctx, "You're not playing this game")?;
+			}
+		} else {
+			msg.reply(ctx, "The game hasn't been accepted yet")?;
 		}
 	}
-	false.into()
+
+	Ok(())
+}
+
+#[command]
+fn draw(ctx: &mut Context, msg: &Message) -> CommandResult {
+	let mut gs = GAMES.lock().unwrap();
+
+	if !gs.contains_key(&msg.channel_id) {
+		msg.reply(ctx, "No one has started a game in this channel")?;
+	} else {
+		let mut gm = gs.get_mut(&msg.channel_id).unwrap();
+		if gm.running {
+			if msg.author.id == gm.white {
+				if gm.game.side_to_move() == Color::White && gm.game.can_declare_draw() {
+					gm.game.declare_draw();
+					gm.running = false;
+					gm.finished = true;
+					post_board(ctx, gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
+				} else if gm.draw_offer == Some(Color::Black) {
+					gm.game.accept_draw();
+					gm.running = false;
+					gm.finished = true;
+					post_board(ctx, gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
+				} else {
+					gm.draw_offer = Some(Color::White);
+					gm.game.offer_draw(Color::White);
+					msg.reply(ctx, "You have offered a draw")?;
+				}
+			} else if msg.author.id == gm.black {
+				if gm.game.side_to_move() == Color::Black && gm.game.can_declare_draw() {
+					gm.game.declare_draw();
+					gm.running = false;
+					gm.finished = true;
+					post_board(ctx, gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
+				} else if gm.draw_offer == Some(Color::White) {
+					gm.game.accept_draw();
+					gm.running = false;
+					gm.finished = true;
+					post_board(ctx, gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
+				} else {
+					gm.draw_offer = Some(Color::Black);
+					gm.game.offer_draw(Color::White);
+					msg.reply(ctx, "You have offered a draw")?;
+				}
+			} else {
+				msg.reply(ctx, "You're not playing this game")?;
+			}
+		} else {
+			msg.reply(ctx, "The game hasn't been accepted yet")?;
+		}
+	}
+
+	Ok(())
 }
 
 #[command]
 fn enable(ctx: &mut Context, msg: &Message) -> CommandResult {
 	CONFIG.lazy_guild(msg.guild_id.unwrap());
-	CONFIG.guild_settings.lock().unwrap().get_mut(&msg.guild_id.unwrap()).unwrap().set_perm(format!("games.allow.#{}", msg.channel_id), true);
+	CONFIG.guild_settings.write().unwrap().get_mut(&msg.guild_id.unwrap()).unwrap().set_perm(format!("games.allow.#{}", msg.channel_id), true);
 	msg.reply(ctx, format!("Succesfully enabled all games in channel <#{}>", msg.channel_id))?;
 
 	Ok(())
@@ -345,7 +489,7 @@ fn enable(ctx: &mut Context, msg: &Message) -> CommandResult {
 #[command]
 fn disable(ctx: &mut Context, msg: &Message) -> CommandResult {
 	CONFIG.lazy_guild(msg.guild_id.unwrap());
-	CONFIG.guild_settings.lock().unwrap().get_mut(&msg.guild_id.unwrap()).unwrap().set_perm(format!("games.allow.#{}", msg.channel_id), false);
+	CONFIG.guild_settings.write().unwrap().get_mut(&msg.guild_id.unwrap()).unwrap().set_perm(format!("games.allow.#{}", msg.channel_id), false);
 	msg.reply(ctx, format!("Succesfully enabled all games in channel <#{}>", msg.channel_id))?;
 
 	Ok(())
@@ -355,7 +499,7 @@ fn disable(ctx: &mut Context, msg: &Message) -> CommandResult {
 #[aliases("cfg")]
 fn config(ctx: &mut Context, msg: &Message) -> CommandResult {
 	CONFIG.lazy_guild(msg.guild_id.unwrap());
-	let mut lock = CONFIG.guild_settings.lock()?;
+	let mut lock = CONFIG.guild_settings.write()?;
 	let settings = lock.get_mut(&msg.guild_id.unwrap()).unwrap();
 	let mut args = Args::new(&msg.content, &[Delimiter::Single(' ')]);
 	args.advance();
@@ -370,24 +514,27 @@ fn config(ctx: &mut Context, msg: &Message) -> CommandResult {
 	Ok(())
 }
 
+lazy_static! {
+	static ref USER_PING: Regex = Regex::new(r"<@!?(\d+)>").unwrap();
+	static ref CHANNEL_REF: Regex = Regex::new(r"<#(\d+)>").unwrap();
+}
+
 #[command]
 #[aliases("perms")]
 fn permissions(ctx: &mut Context, msg: &Message) -> CommandResult {
 	CONFIG.lazy_guild(msg.guild_id.unwrap());
-	let mut lock = CONFIG.guild_settings.lock()?;
+	let mut lock = CONFIG.guild_settings.write()?;
 	let settings = lock.get_mut(&msg.guild_id.unwrap()).unwrap();
 	let mut args = Args::new(&msg.content, &[Delimiter::Single(' ')]);
 	args.advance();
+
 	let mode = args.single::<String>()?;
-	let mut setting = args.single::<String>()?;
-	lazy_static! {
-		static ref USER_PING: Regex = Regex::new(r"<@!?\d+>").unwrap();
-		static ref CHANNEL_REF: Regex = Regex::new(r"<#\d+>").unwrap();
-	}
+	let mut setting = args.single::<String>()?; //TODO can't have whitespace in setting
 	setting.retain(|c| match c {
 		'<' | '>' | '!' | ' ' => false,
 		_ => true
 	});
+
 	if mode == "set" {
 		let val = args.single::<bool>()?;
 		settings.set_perm(setting.clone(), val);
@@ -396,10 +543,19 @@ fn permissions(ctx: &mut Context, msg: &Message) -> CommandResult {
 		if mode == "reset" {
 			settings.unset_perm(setting.clone());
 		}
-		let opt = settings.get_perm(setting.clone(), msg.author.id, msg.channel_id);
+		let opt = settings.get_perm(
+			setting.clone(),
+			match USER_PING.captures(&setting) {
+				Some(caps) => { u64::from_str_radix(caps.get(1).unwrap().as_str(), 10).unwrap().into() }
+				None => msg.author.id
+			},
+			match CHANNEL_REF.captures(&setting) {
+				Some(caps) => { u64::from_str_radix(caps.get(1).unwrap().as_str(), 10).unwrap().into() }
+				None => msg.channel_id
+			});
 		match opt {
 			Some(perm) => {
-				let mut k = setting.clone();
+				let mut k = setting;
 				k.push_str(".@");
 				k.push_str(&msg.author.id.to_string());
 				k.push_str(".#");
@@ -418,8 +574,9 @@ fn permissions(ctx: &mut Context, msg: &Message) -> CommandResult {
 #[command]
 #[aliases("pref", "prefs")]
 fn preferences(ctx: &mut Context, msg: &Message) -> CommandResult {
+	check_perm(msg, "prefs.allow")?;
 	CONFIG.lazy_user(msg.author.id);
-	let mut lock = CONFIG.user_prefs.lock()?;
+	let mut lock = CONFIG.user_prefs.write()?;
 	let prefs = lock.get_mut(&msg.author.id).unwrap();
 	let mut args = Args::new(&msg.content, &[Delimiter::Single(' ')]);
 	args.advance();

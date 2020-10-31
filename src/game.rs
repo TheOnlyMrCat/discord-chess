@@ -1,14 +1,16 @@
 use chess::*;
 use serenity::model::id::{UserId, MessageId};
+use std::collections::VecDeque;
 
 pub struct ChannelGame {
 	pub game: Game,
 	pub running: bool,
 	pub finished: bool,
-	pub old_boards: Vec<MessageId>,
+	pub old_boards: VecDeque<MessageId>,
 	pub white: UserId,
 	pub black: UserId,
-	pub initiator: Color
+	pub initiator: Color,
+	pub draw_offer: Option<Color>,
 }
 
 impl ChannelGame {
@@ -17,10 +19,11 @@ impl ChannelGame {
 			game: Game::new(),
 			running: false,
 			finished: false,
-			old_boards: Vec::new(),
+			old_boards: VecDeque::new(),
 			white: UserId::default(),
 			black: UserId::default(),
 			initiator: Color::White,
+			draw_offer: None,
 		}
 	}
 
