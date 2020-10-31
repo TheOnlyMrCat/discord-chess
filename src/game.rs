@@ -11,6 +11,7 @@ pub struct ChannelGame {
 	pub black: UserId,
 	pub initiator: Color,
 	pub draw_offer: Option<Color>,
+	pub last_move: Option<ChessMove>,
 }
 
 impl ChannelGame {
@@ -24,6 +25,7 @@ impl ChannelGame {
 			black: UserId::default(),
 			initiator: Color::White,
 			draw_offer: None,
+			last_move: None,
 		}
 	}
 
@@ -44,8 +46,14 @@ impl ChannelGame {
 	}
 }
 
+pub enum MoveError {
+	Illegal,
+	IllFormed,
+	Ambiguous,
+}
+
 pub trait FromSan {
-	fn from_san(board: &Board, move_text: &str) -> Result<ChessMove, Error>;
+	fn from_san(board: &Board, move_text: &str) -> Result<ChessMove, MoveError>;
 }
 
 impl FromSan for ChessMove {
@@ -63,7 +71,7 @@ impl FromSan for ChessMove {
 	///     ChessMove::new(Square::E2, Square::E4, None)
 	/// );
 	/// ```
-	fn from_san(board: &Board, move_text: &str) -> Result<ChessMove, Error> {
+	fn from_san(board: &Board, move_text: &str) -> Result<ChessMove, MoveError> {
 		// Castles first...
 		if move_text == "O-O" || move_text == "O-O-O" {
 			let rank = board.side_to_move().to_my_backrank();
@@ -78,7 +86,7 @@ impl FromSan for ChessMove {
 			if MoveGen::new_legal(&board).any(|l| l == m) {
 				return Ok(m);
 			} else {
-				return Err(Error::InvalidBoard);
+				return Err(MoveError::Illegal);
 			}
 		}
 
@@ -135,7 +143,7 @@ impl FromSan for ChessMove {
 		let mut cur_index: usize = 0;
 		let moving_piece = match move_text
 			.get(cur_index..(cur_index + 1))
-			.ok_or(Error::InvalidBoard)?
+			.ok_or(MoveError::IllFormed)?
 		{
 			"N" => {
 				cur_index += 1;
@@ -162,7 +170,7 @@ impl FromSan for ChessMove {
 
 		let mut source_file = match move_text
 			.get(cur_index..(cur_index + 1))
-			.ok_or(Error::InvalidBoard)?
+			.ok_or(MoveError::IllFormed)?
 		{
 			"a" => {
 				cur_index += 1;
@@ -201,7 +209,7 @@ impl FromSan for ChessMove {
 
 		let mut source_rank = match move_text
 			.get(cur_index..(cur_index + 1))
-			.ok_or(Error::InvalidBoard)?
+			.ok_or(MoveError::IllFormed)?
 		{
 			"1" => {
 				cur_index += 1;
@@ -256,8 +264,8 @@ impl FromSan for ChessMove {
 				q
 			} else {
 				let sq = Square::make_square(
-					source_rank.ok_or(Error::InvalidBoard)?,
-					source_file.ok_or(Error::InvalidBoard)?,
+					source_rank.ok_or(MoveError::IllFormed)?,
+					source_file.ok_or(MoveError::IllFormed)?,
 				);
 				source_rank = None;
 				source_file = None;
@@ -265,8 +273,8 @@ impl FromSan for ChessMove {
 			}
 		} else {
 			let sq = Square::make_square(
-				source_rank.ok_or(Error::InvalidBoard)?,
-				source_file.ok_or(Error::InvalidBoard)?,
+				source_rank.ok_or(MoveError::IllFormed)?,
+				source_file.ok_or(MoveError::IllFormed)?,
 			);
 			source_rank = None;
 			source_file = None;
@@ -330,7 +338,7 @@ impl FromSan for ChessMove {
 		//}
 
 		// Ok, now we have all the data from the SAN move, in the following structures
-		// moveing_piece, source_rank, source_file, taks, dest, promotion, maybe_check_or_mate, and
+		// moving_piece, source_rank, source_file, taks, dest, promotion, maybe_check_or_mate, and
 		// ep
 
 		let mut found_move: Option<ChessMove> = None;
@@ -361,7 +369,8 @@ impl FromSan for ChessMove {
 			}
 
 			if found_move.is_some() {
-				return Err(Error::InvalidFen{fen: String::from("")});
+				// There's more than one move which fits the properties
+				return Err(MoveError::Ambiguous);
 			}
 
 			// takes is complicated, because of e.p.
@@ -380,6 +389,6 @@ impl FromSan for ChessMove {
 			found_move = Some(m);
 		}
 
-		found_move.ok_or(Error::InvalidFen{fen: String::from("")})
+		found_move.ok_or(MoveError::Illegal)
 	}
 }

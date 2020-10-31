@@ -62,7 +62,24 @@ lazy_static! {
 
 	static ref BOARD_IMG_WHITE: Image = raster::open("res/board_annotated_white.png").unwrap();
 	static ref BOARD_IMG_BLACK: Image = raster::open("res/board_annotated_black.png").unwrap();
-	static ref PIECES_IMG: Image = raster::open("res/pieces.png").unwrap();
+
+	static ref PAWNS_IMG: Image = raster::open("res/pawns.png").unwrap();
+	static ref KNIGHTS_IMG: Image = raster::open("res/knights.png").unwrap();
+	static ref BISHOPS_IMG: Image = raster::open("res/bishops.png").unwrap();
+	static ref ROOKS_IMG: Image = raster::open("res/rooks.png").unwrap();
+	static ref QUEENS_IMG: Image = raster::open("res/queens.png").unwrap();
+	static ref KINGS_IMG: Image = raster::open("res/kings.png").unwrap();
+
+	static ref YELLOW_SQUARE: Image = {
+		let mut img = raster::Image::blank(80, 80);
+		raster::editor::fill(&mut img, raster::Color::rgb(255, 255, 127));
+		img
+	};
+	static ref RED_SQUARE: Image = {
+		let mut img = raster::Image::blank(80, 80);
+		raster::editor::fill(&mut img, raster::Color::rgb(255, 83, 83));
+		img
+	};
 }
 
 #[group]
@@ -109,10 +126,12 @@ impl EventHandler for Handler {
 				if MOVE_REGEX.is_match(&msg.content) || CASTLE_REGEX.is_match(&msg.content) {
 					let result = ChessMove::from_san(&gm.game.current_position(), &msg.content);
 					match result {
-						Err(chess::Error::InvalidBoard) => { msg.reply(ctx, format!("Ill-formed move: {}", msg.content)).unwrap(); },
-						Err(_) => { msg.reply(ctx, format!("Illegal move: {}", msg.content)).unwrap(); }
+						Err(game::MoveError::IllFormed) => { msg.reply(ctx, format!("Ill-formed move: {}", msg.content)).unwrap(); },
+						Err(game::MoveError::Illegal) => { msg.reply(ctx, format!("Illegal move: {}", msg.content)).unwrap(); }
+						Err(game::MoveError::Ambiguous) => { msg.reply(ctx, format!("Ambiguous move: {}", msg.content)).unwrap(); }
 						Ok(mv) => {
 							gm.game.make_move(mv);
+							gm.last_move = Some(mv);
 							gm.draw_offer = None;
 							post_board(&ctx, gm, &msg.channel(&ctx).unwrap().guild().unwrap().read()).unwrap();
 						}
@@ -127,9 +146,16 @@ fn main() {
 	use std::io::Write;
 	print!("Loading images...");
 	std::io::stdout().lock().flush().unwrap();
+
 	lazy_static::initialize(&BOARD_IMG_WHITE);
 	lazy_static::initialize(&BOARD_IMG_BLACK);
-	lazy_static::initialize(&PIECES_IMG);
+	lazy_static::initialize(&PAWNS_IMG);
+	lazy_static::initialize(&KNIGHTS_IMG);
+	lazy_static::initialize(&BISHOPS_IMG);
+	lazy_static::initialize(&ROOKS_IMG);
+	lazy_static::initialize(&QUEENS_IMG);
+	lazy_static::initialize(&KINGS_IMG);
+
 	println!(" Done.");
 
 	let mut client = Client::new(std::env::var("DISCORD_TOKEN").unwrap(), Handler).expect("Error creating client");
@@ -165,37 +191,48 @@ fn post_board(ctx: &Context, gm: &mut ChannelGame, ch: &GuildChannel) -> Command
 			const RANK_INDEX: [Rank; 8] = [Rank::Eighth, Rank::Seventh, Rank::Sixth, Rank::Fifth, Rank::Fourth, Rank::Third, Rank::Second, Rank::First];
 			const FILE_INDEX: [File; 8] = [File::A, File::B, File::C, File::D, File::E, File::F, File::G, File::H];
 
-			const BASE_OFFSET: i32 = 5;
-			const PIECE_OFFSET: i32 = 95;
-			const WHITE_OFFSET: i32 = 80;
+			let posx: usize;
+			let posy: usize;
+			if use_black {
+				posx = 7 - x;
+				posy = 7 - y;
+			} else {
+				posx = x;
+				posy = y;
+			}
 
 			let square = Square::make_square(RANK_INDEX[y], FILE_INDEX[x]);
-			if let Some(piece) = gm.game.current_position().piece_on(square) {
-				let mut piece_img = PIECES_IMG.clone();
-				raster::editor::crop(&mut piece_img, 55, 55, PositionMode::TopLeft, BASE_OFFSET + PIECE_OFFSET * (match piece {
-					Piece::King => 0,
-					Piece::Queen => 1,
-					Piece::Rook => 2,
-					Piece::Bishop => 3,
-					Piece::Knight => 4,
-					Piece::Pawn => 5
-				}), if gm.game.current_position().color_on(square) == Some(Color::White) { WHITE_OFFSET } else { 0 }).unwrap();
-				raster::editor::resize(&mut piece_img, 80, 80, ResizeMode::Exact).unwrap();
-				let posx: usize;
-				let posy: usize;
-				if use_black {
-					posx = 7 - x;
-					posy = 7 - y;
-				} else {
-					posx = x;
-					posy = y;
+			if let Some(last_move) = gm.last_move {
+				if square == last_move.get_source() || square == last_move.get_dest() {
+					board = raster::editor::blend(&board, &YELLOW_SQUARE, BlendMode::Normal, 1.0, PositionMode::TopLeft, (40 + posx * 80) as i32, (40 + posy * 80) as i32).unwrap();
 				}
+			}
+			
+			if let Some(piece) = gm.game.current_position().piece_on(square) {
+				let (mut piece_img, white_ctr, black_ctr) = match piece {
+					Piece::Pawn => (PAWNS_IMG.clone(), 46, 116),
+					Piece::Knight => (KNIGHTS_IMG.clone(), 45, 120),
+					Piece::Bishop => (BISHOPS_IMG.clone(), 43, 118),
+					Piece::Rook => (ROOKS_IMG.clone(), 45, 116),
+					Piece::Queen => (QUEENS_IMG.clone(), 42, 120),
+					Piece::King => (KINGS_IMG.clone(), 42, 118),
+				};
+				raster::editor::crop(
+					&mut piece_img,
+					80, 80, PositionMode::TopLeft,
+					if gm.game.current_position().color_on(square) == Some(Color::White) {
+						white_ctr - 40
+					} else {
+						black_ctr - 40
+					},
+					0
+				).unwrap();
+				// raster::editor::resize(&mut piece_img, 80, 80, ResizeMode::Exact).unwrap();
 				board = raster::editor::blend(&board, &piece_img, BlendMode::Normal, 1.0, PositionMode::TopLeft, (40 + posx * 80) as i32, (40 + posy * 80) as i32).unwrap();
 			}
 		}
 	}
 
-	println!("Encoding image");
 	let bytes = {
 		use png::{Encoder, Compression, ColorType, BitDepth};
 
@@ -212,7 +249,6 @@ fn post_board(ctx: &Context, gm: &mut ChannelGame, ch: &GuildChannel) -> Command
 		bytes
 	};
 
-	println!("Sending board...");
 	let sent = ch.send_message(
 		ctx,
 		|c| {
@@ -252,12 +288,8 @@ fn post_board(ctx: &Context, gm: &mut ChannelGame, ch: &GuildChannel) -> Command
 			}
 			gm.old_boards.push_back(sent);
 		}
-		"off" => {}
-		_ => {
-			panic!("Unexpected value for deleteOld");
-		}
+		_ => {} // Includes "off"
 	}
-	println!("Sent");
 
 	Ok(())
 }
