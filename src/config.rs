@@ -16,6 +16,24 @@ pub struct UserConfig {
 	pub settings: HashMap<String, String>,
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct UserStats {
+	// Games won
+	pub won_default: u32, // Opponent resigned
+	pub won_checkmate: u32, // Checkmated opponent
+	// Games drawn
+	pub drawn_stalemate: u32, // Ended in stalemate
+	pub drawn_agreement: u32, // Drawn by agreement
+	pub drawn_declared: u32, // Drawn by declared draw
+	// Games lost
+	pub lost_resigned: u32, // Resigned
+	pub lost_checkmate: u32, // Was checkmated
+	// General statistics
+	pub moves_made: u32,
+	pub pieces_captured: u32,
+	pub checks_given: u32,
+}
+
 impl Config {
 	pub fn lazy_guild(&self, id: GuildId) {
 		self.guild_settings.write().unwrap().entry(id).or_insert_with(GuildConfig::new);
@@ -98,7 +116,8 @@ impl UserConfig {
 		let mut cfg = UserConfig {
 			settings: HashMap::new()
 		};
-		cfg.settings.insert("flipIfBlack".to_string(), "true".to_string());
+		cfg.settings.insert("flipIfBlack".to_owned(), "true".to_owned());
+		cfg.settings.insert("pingMyTurn".to_owned(), "true".to_owned());
 		cfg
 	}
 }

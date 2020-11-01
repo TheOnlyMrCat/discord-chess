@@ -374,16 +374,12 @@ impl FromSan for ChessMove {
 			}
 
 			// takes is complicated, because of e.p.
-			if !takes {
-				if board.piece_on(m.get_dest()).is_some() {
-					continue;
-				}
+			if !takes && board.piece_on(m.get_dest()).is_some() {
+				continue;
 			}
 
-			if !ep && takes {
-				if board.piece_on(m.get_dest()).is_none() {
-					continue;
-				}
+			if !ep && takes && board.piece_on(m.get_dest()).is_none() {
+				continue;
 			}
 
 			found_move = Some(m);

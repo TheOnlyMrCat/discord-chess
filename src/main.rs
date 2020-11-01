@@ -43,7 +43,7 @@ use serenity::{
 
 use rand::prelude::*;
 use regex::Regex;
-use raster::{Image,PositionMode,BlendMode,editor::ResizeMode};
+use raster::{Image,PositionMode,BlendMode};
 use chess::{Color,ChessMove,Rank,File,Piece,Square,GameResult};
 
 mod config;
@@ -52,6 +52,7 @@ use config::*;
 mod game;
 use game::*;
 
+//MARK: Statics
 lazy_static! {
 	static ref CONFIG: Config = Config {
 		guild_settings: RwLock::new(HashMap::<_, _>::new()),
@@ -59,6 +60,7 @@ lazy_static! {
 	};
 
 	static ref GAMES: Mutex<HashMap<ChannelId, ChannelGame>> = Mutex::new(HashMap::<_, _>::new());
+	static ref USERS: Mutex<HashMap<UserId, UserStats>> = Mutex::new(HashMap::<_, _>::new());
 
 	static ref BOARD_IMG_WHITE: Image = raster::open("res/board_annotated_white.png").unwrap();
 	static ref BOARD_IMG_BLACK: Image = raster::open("res/board_annotated_black.png").unwrap();
@@ -72,12 +74,12 @@ lazy_static! {
 
 	static ref YELLOW_SQUARE: Image = {
 		let mut img = raster::Image::blank(80, 80);
-		raster::editor::fill(&mut img, raster::Color::rgb(255, 255, 127));
+		raster::editor::fill(&mut img, raster::Color::rgb(255, 255, 127)).unwrap();
 		img
 	};
 	static ref RED_SQUARE: Image = {
 		let mut img = raster::Image::blank(80, 80);
-		raster::editor::fill(&mut img, raster::Color::rgb(255, 83, 83));
+		raster::editor::fill(&mut img, raster::Color::rgb(255, 83, 83)).unwrap();
 		img
 	};
 }
@@ -85,7 +87,7 @@ lazy_static! {
 #[group]
 #[help_available]
 #[only_in(guilds)]
-#[commands(play, accept, decline, cancel, preferences)]
+#[commands(play, accept, decline, cancel, preferences, statistics)]
 struct General;
 
 #[group]
@@ -113,6 +115,7 @@ impl EventHandler for Handler {
 		println!("Ready");
 	}
 
+	//MARK: Message handler
 	fn message(&self, ctx: Context, msg: Message) {
 		let mut gs = GAMES.lock().unwrap();
 
@@ -134,6 +137,42 @@ impl EventHandler for Handler {
 							gm.last_move = Some(mv);
 							gm.draw_offer = None;
 							post_board(&ctx, gm, &msg.channel(&ctx).unwrap().guild().unwrap().read()).unwrap();
+
+							let mut lock = USERS.lock().unwrap();
+							
+							let mut author_stats = get_stats_for(&mut lock, msg.author.id);
+							author_stats.moves_made += 1;
+							if msg.content.contains('x') { // All capture moves must contain 'x', lest they be marked illegal
+								author_stats.pieces_captured += 1;
+							}
+							if gm.game.current_position().checkers().popcnt() > 0 { // This move put the opponent's king in check
+								author_stats.checks_given += 1;
+							}
+							std::mem::drop(author_stats);
+
+							if let Some(result) = gm.game.result() {
+								let mut white_stats = get_stats_for(&mut lock, gm.white);
+								match result {
+									GameResult::WhiteCheckmates => white_stats.won_checkmate += 1,
+									GameResult::BlackResigns => white_stats.won_default += 1,
+									GameResult::BlackCheckmates => white_stats.lost_checkmate += 1,
+									GameResult::WhiteResigns => white_stats.lost_resigned += 1,
+									GameResult::Stalemate => white_stats.drawn_stalemate += 1,
+									GameResult::DrawAccepted => white_stats.drawn_agreement += 1,
+									GameResult::DrawDeclared => white_stats.drawn_declared += 1,
+								}
+								std::mem::drop(white_stats);
+								let mut black_stats = get_stats_for(&mut lock, gm.black);
+								match result {
+									GameResult::BlackCheckmates => black_stats.won_checkmate += 1,
+									GameResult::WhiteResigns => black_stats.won_default += 1,
+									GameResult::WhiteCheckmates => black_stats.lost_checkmate += 1,
+									GameResult::BlackResigns => black_stats.lost_resigned += 1,
+									GameResult::Stalemate => black_stats.drawn_stalemate += 1,
+									GameResult::DrawAccepted => black_stats.drawn_agreement += 1,
+									GameResult::DrawDeclared => black_stats.drawn_declared += 1,
+								}
+							}
 						}
 					}
 				}
@@ -142,6 +181,7 @@ impl EventHandler for Handler {
 	}
 }
 
+//MARK: Main
 fn main() {
 	use std::io::Write;
 	print!("Loading images...");
@@ -180,6 +220,7 @@ fn main() {
 	}
 }
 
+//MARK: Board
 fn post_board(ctx: &Context, gm: &mut ChannelGame, ch: &GuildChannel) -> CommandResult {
 	CONFIG.lazy_guild(ch.guild_id);
 	CONFIG.lazy_user(gm.black);
@@ -189,11 +230,11 @@ fn post_board(ctx: &Context, gm: &mut ChannelGame, ch: &GuildChannel) -> Command
 	let use_black = gm.game.side_to_move() == Color::Black && CONFIG.user_prefs.read().unwrap().get(&gm.black).unwrap().settings.get("flipIfBlack").unwrap().parse::<bool>().unwrap_or(false);
 	let mut board = if use_black { BOARD_IMG_BLACK.clone() } else { BOARD_IMG_WHITE.clone() };
 
-	for y in 0..=7 {
-		for x in 0..=7 {
-			const RANK_INDEX: [Rank; 8] = [Rank::Eighth, Rank::Seventh, Rank::Sixth, Rank::Fifth, Rank::Fourth, Rank::Third, Rank::Second, Rank::First];
-			const FILE_INDEX: [File; 8] = [File::A, File::B, File::C, File::D, File::E, File::F, File::G, File::H];
+	const RANK_INDEX: [Rank; 8] = [Rank::Eighth, Rank::Seventh, Rank::Sixth, Rank::Fifth, Rank::Fourth, Rank::Third, Rank::Second, Rank::First];
+	const FILE_INDEX: [File; 8] = [File::A, File::B, File::C, File::D, File::E, File::F, File::G, File::H];
 
+	for (y, &rank) in RANK_INDEX.iter().enumerate() {
+		for (x, &file) in FILE_INDEX.iter().enumerate() {
 			let posx: usize;
 			let posy: usize;
 			if use_black {
@@ -204,17 +245,16 @@ fn post_board(ctx: &Context, gm: &mut ChannelGame, ch: &GuildChannel) -> Command
 				posy = y;
 			}
 
-			let square = Square::make_square(RANK_INDEX[y], FILE_INDEX[x]);
+			let square = Square::make_square(rank, file);
 			if let Some(last_move) = gm.last_move {
 				if square == last_move.get_source() || square == last_move.get_dest() {
 					board = raster::editor::blend(&board, &YELLOW_SQUARE, BlendMode::Normal, 1.0, PositionMode::TopLeft, (40 + posx * 80) as i32, (40 + posy * 80) as i32).unwrap();
 				}
 			}
 
-			if gm.game.current_position().checkers().popcnt() > 0 {
-				if square == gm.game.current_position().king_square(gm.game.side_to_move()) {
-					board = raster::editor::blend(&board, &RED_SQUARE, BlendMode::Normal, 1.0, PositionMode::TopLeft, (40 + posx * 80) as i32, (40 + posy * 80) as i32).unwrap();
-				}
+			if gm.game.current_position().checkers().popcnt() > 0
+				&& square == gm.game.current_position().king_square(gm.game.side_to_move()) {
+				board = raster::editor::blend(&board, &RED_SQUARE, BlendMode::Normal, 1.0, PositionMode::TopLeft, (40 + posx * 80) as i32, (40 + posy * 80) as i32).unwrap();
 			}
 			
 			if let Some(piece) = gm.game.current_position().piece_on(square) {
@@ -276,10 +316,8 @@ fn post_board(ctx: &Context, gm: &mut ChannelGame, ch: &GuildChannel) -> Command
 				}));
 				gm.running = false;
 				gm.finished = true;
-			} else {
-				if gm.game.can_declare_draw() {
-					c.content(format!("{} to play can declare draw", match gm.game.side_to_move() { Color::White => "White", Color::Black => "Black" }));
-				}
+			} else if gm.game.can_declare_draw() {
+				c.content(format!("{} to play can declare draw", match gm.game.side_to_move() { Color::White => "White", Color::Black => "Black" }));
 			}
 			c
 		}
@@ -311,6 +349,11 @@ fn check_perm(msg: &Message, perm: &str) -> CommandResult {
 	}
 }
 
+fn get_stats_for<'a>(lock: &'a mut std::sync::MutexGuard<HashMap<UserId, UserStats>>, user: UserId) -> &'a mut UserStats {
+	lock.entry(user).or_insert_with(Default::default)
+}
+
+//MARK: Commands
 #[help]
 fn main_help(
 	ctx: &mut Context,
@@ -418,6 +461,51 @@ fn cancel(ctx: &mut Context, msg: &Message) -> CommandResult {
 	} else {
 		msg.reply(ctx, "No one has started a game in this channel")?;
 	}
+
+	Ok(())
+}
+
+#[command]
+#[aliases("stats", "stat")]
+fn statistics(ctx: &mut Context, msg: &Message) -> CommandResult {
+	let stats = *get_stats_for(&mut USERS.lock().unwrap(), msg.author.id);
+
+	msg.channel(&ctx).unwrap().guild().unwrap().read().send_message(&ctx, |m| m.embed(|embed| {
+		embed.colour(serenity::utils::Colour::from_rgb(255, 255, 0));
+		embed.field("Games", format!("Total: {}", stats.won_checkmate + stats.won_default + stats.drawn_stalemate + stats.drawn_agreement + stats.drawn_declared + stats.lost_checkmate + stats.lost_resigned), false);
+		embed.field(
+			"Games won",
+			format!("In total: {}\nBy checkmate: {}\nBy default: {}", stats.won_checkmate + stats.won_default, stats.won_checkmate, stats.won_default),
+			true
+		);
+		embed.field(
+			"Games drawn",
+			format!("In total: {}\nBy stalemate: {}\nBy agreement: {}\nBy declaration: {}", stats.drawn_agreement + stats.drawn_declared + stats.drawn_stalemate, stats.drawn_stalemate, stats.drawn_agreement, stats.drawn_declared),
+			true
+		);
+		embed.field(
+			"Games lost",
+			format!("In total: {}\nBy checkmate: {}\nBy resignation: {}", stats.lost_checkmate + stats.lost_resigned, stats.lost_checkmate, stats.lost_resigned),
+			true
+		);
+		embed.field("Actions", "_ _", false);
+		embed.field(
+			"Moves made",
+			stats.moves_made,
+			true
+		);
+		embed.field(
+			"Pieces captured",
+			stats.pieces_captured,
+			true
+		);
+		embed.field(
+			"Checks given",
+			stats.checks_given,
+			true
+		);
+		embed
+	}))?;
 
 	Ok(())
 }
@@ -531,7 +619,7 @@ fn enable(ctx: &mut Context, msg: &Message) -> CommandResult {
 fn disable(ctx: &mut Context, msg: &Message) -> CommandResult {
 	CONFIG.lazy_guild(msg.guild_id.unwrap());
 	CONFIG.guild_settings.write().unwrap().get_mut(&msg.guild_id.unwrap()).unwrap().set_perm(format!("games.allow.#{}", msg.channel_id), false);
-	msg.reply(ctx, format!("Succesfully enabled all games in channel <#{}>", msg.channel_id))?;
+	msg.reply(ctx, format!("Succesfully disabled all games in channel <#{}>", msg.channel_id))?;
 
 	Ok(())
 }
@@ -546,7 +634,7 @@ fn config(ctx: &mut Context, msg: &Message) -> CommandResult {
 	args.advance();
 	let setting = args.single::<String>()?;
 	if let Ok(val) = args.single::<String>() {
-		let old_value = settings.settings.insert(setting.clone(), val).unwrap_or("".to_string());
+		let old_value = settings.settings.insert(setting.clone(), val).unwrap_or_else(String::new);
 		msg.reply(ctx, format!("Value of {} set to \"{}\" (previously \"{}\")", setting, settings.settings.get(&setting).unwrap(), old_value))?;
 	} else {
 		msg.reply(ctx, format!("Value of {} is: \"{}\"", setting, settings.settings.get(&setting).unwrap_or(&"".to_string())))?;
@@ -571,10 +659,7 @@ fn permissions(ctx: &mut Context, msg: &Message) -> CommandResult {
 
 	let mode = args.single::<String>()?;
 	let mut setting = args.single::<String>()?; //TODO can't have whitespace in setting
-	setting.retain(|c| match c {
-		'<' | '>' | '!' | ' ' => false,
-		_ => true
-	});
+	setting.retain(|c| !matches!(c, '<' | '>' | '!' | ' '));
 
 	if mode == "set" {
 		let val = args.single::<bool>()?;
@@ -623,7 +708,7 @@ fn preferences(ctx: &mut Context, msg: &Message) -> CommandResult {
 	args.advance();
 	let setting = args.single::<String>()?; //TODO: what if it isn't?
 	if let Ok(val) = args.single::<String>() {
-		let old_value = prefs.settings.insert(setting.clone(), val).unwrap_or("".to_string());
+		let old_value = prefs.settings.insert(setting.clone(), val).unwrap_or_else(String::new);
 		msg.reply(ctx, format!("Value of {} set to \"{}\" (previously \"{}\")", setting, prefs.settings.get(&setting).unwrap(), old_value))?;
 	} else {
 		msg.reply(ctx, format!("Value of {} is: \"{}\"", setting, prefs.settings.get(&setting).unwrap_or(&"".to_string())))?;
