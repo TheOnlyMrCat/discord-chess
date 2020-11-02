@@ -145,50 +145,7 @@ impl EventHandler for Handler {
 							}
 							std::mem::drop(author_stats);
 
-							if let Some(result) = gm.game.result() {
-								USERS.alter(gm.white, |opt| match opt {
-									Some(stats) => Some(stats),
-									None=> Some(UserStats::default())
-								});
-								USERS.alter(gm.black, |opt| match opt {
-									Some(stats) => Some(stats),
-									None=> Some(UserStats::default())
-								});
-								let mut white_stats = USERS.get_mut(&gm.white).unwrap();
-								let mut black_stats = USERS.get_mut(&gm.black).unwrap();
-								match result {
-									GameResult::WhiteCheckmates => {
-										white_stats.won_checkmate += 1;
-										black_stats.lost_checkmate += 1;
-									},
-									GameResult::BlackResigns => {
-										white_stats.won_default += 1;
-										black_stats.lost_resigned += 1;
-									},
-									GameResult::BlackCheckmates => {
-										white_stats.lost_checkmate += 1;
-										black_stats.won_checkmate += 1;
-									},
-									GameResult::WhiteResigns => {
-										white_stats.lost_resigned += 1;
-										black_stats.won_default += 1;
-									},
-									GameResult::Stalemate => {
-										white_stats.drawn_stalemate += 1;
-										black_stats.drawn_stalemate += 1;
-									},
-									GameResult::DrawAccepted => {
-										white_stats.drawn_agreement += 1;
-										black_stats.drawn_agreement += 1;
-									},
-									GameResult::DrawDeclared => {
-										white_stats.drawn_declared += 1;
-										black_stats.drawn_declared += 1;
-									},
-								}
-
-								gm.state = ChannelGameState::Inactive;
-							}
+							check_game_result(&mut gm);
 						}
 					}
 				}
@@ -355,6 +312,53 @@ fn post_board(ctx: &Context, gm: &ChannelGame, ch: &GuildChannel) -> CommandResu
 	}
 
 	Ok(())
+}
+
+fn check_game_result(gm: &mut ChannelGame) {
+	if let Some(result) = gm.game.result() {
+		USERS.alter(gm.white, |opt| match opt {
+			Some(stats) => Some(stats),
+			None=> Some(UserStats::default())
+		});
+		USERS.alter(gm.black, |opt| match opt {
+			Some(stats) => Some(stats),
+			None=> Some(UserStats::default())
+		});
+		let mut white_stats = USERS.get_mut(&gm.white).unwrap();
+		let mut black_stats = USERS.get_mut(&gm.black).unwrap();
+		match result {
+			GameResult::WhiteCheckmates => {
+				white_stats.won_checkmate += 1;
+				black_stats.lost_checkmate += 1;
+			},
+			GameResult::BlackResigns => {
+				white_stats.won_default += 1;
+				black_stats.lost_resigned += 1;
+			},
+			GameResult::BlackCheckmates => {
+				white_stats.lost_checkmate += 1;
+				black_stats.won_checkmate += 1;
+			},
+			GameResult::WhiteResigns => {
+				white_stats.lost_resigned += 1;
+				black_stats.won_default += 1;
+			},
+			GameResult::Stalemate => {
+				white_stats.drawn_stalemate += 1;
+				black_stats.drawn_stalemate += 1;
+			},
+			GameResult::DrawAccepted => {
+				white_stats.drawn_agreement += 1;
+				black_stats.drawn_agreement += 1;
+			},
+			GameResult::DrawDeclared => {
+				white_stats.drawn_declared += 1;
+				black_stats.drawn_declared += 1;
+			},
+		}
+
+		gm.state = ChannelGameState::Inactive;
+	}
 }
 
 fn check_perm(msg: &Message, perm: &str) -> CommandResult {
@@ -525,9 +529,11 @@ fn resign(ctx: &mut Context, msg: &Message) -> CommandResult {
 			if msg.author.id == gm.white {
 				gm.game.resign(Color::White);
 				post_board(ctx, &gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
+				check_game_result(&mut gm);
 			} else if msg.author.id == gm.black {
 				gm.game.resign(Color::Black);
 				post_board(ctx, &gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
+				check_game_result(&mut gm);
 			} else {
 				msg.reply(ctx, "You're not playing this game")?;
 			}
@@ -546,12 +552,12 @@ fn draw(ctx: &mut Context, msg: &Message) -> CommandResult {
 			if msg.author.id == gm.white {
 				if gm.game.side_to_move() == Color::White && gm.game.can_declare_draw() {
 					gm.game.declare_draw();
-					gm.state = ChannelGameState::Inactive;
 					post_board(ctx, &gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
+					check_game_result(&mut gm);
 				} else if gm.draw_offer == Some(Color::Black) {
 					gm.game.accept_draw();
-					gm.state = ChannelGameState::Inactive;
 					post_board(ctx, &gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
+					check_game_result(&mut gm);
 				} else {
 					gm.draw_offer = Some(Color::White);
 					gm.game.offer_draw(Color::White);
@@ -560,12 +566,11 @@ fn draw(ctx: &mut Context, msg: &Message) -> CommandResult {
 			} else if msg.author.id == gm.black {
 				if gm.game.side_to_move() == Color::Black && gm.game.can_declare_draw() {
 					gm.game.declare_draw();
-					gm.state = ChannelGameState::Inactive;
 					post_board(ctx, &gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
 				} else if gm.draw_offer == Some(Color::White) {
 					gm.game.accept_draw();
-					gm.state = ChannelGameState::Inactive;
 					post_board(ctx, &gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
+					check_game_result(&mut gm);
 				} else {
 					gm.draw_offer = Some(Color::Black);
 					gm.game.offer_draw(Color::White);
