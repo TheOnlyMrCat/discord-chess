@@ -1,14 +1,7 @@
-#[macro_use]
-extern crate lazy_static;
-extern crate serenity;
-extern crate raster;
-extern crate chess;
-extern crate regex;
-extern crate rand;
-extern crate png;
+#[macro_use] extern crate lazy_static;
 
 use std::collections::{HashSet,HashMap};
-use std::sync::{RwLock,Mutex};
+use std::sync::{RwLock};
 use std::borrow::Cow;
 
 use serenity::{
@@ -46,6 +39,8 @@ use regex::Regex;
 use raster::{Image,PositionMode,BlendMode};
 use chess::{Color,ChessMove,Rank,File,Piece,Square,GameResult};
 
+use chashmap::CHashMap;
+
 mod config;
 use config::*;
 
@@ -59,8 +54,8 @@ lazy_static! {
 		user_prefs: RwLock::new(HashMap::<_, _>::new())
 	};
 
-	static ref GAMES: Mutex<HashMap<ChannelId, ChannelGame>> = Mutex::new(HashMap::<_, _>::new());
-	static ref USERS: Mutex<HashMap<UserId, UserStats>> = Mutex::new(HashMap::<_, _>::new());
+	static ref GAMES: CHashMap<ChannelId, ChannelGame> = CHashMap::<_, _>::new();
+	static ref USERS: CHashMap<UserId, UserStats> = CHashMap::<_, _>::new();
 
 	static ref BOARD_IMG_WHITE: Image = raster::open("res/board_annotated_white.png").unwrap();
 	static ref BOARD_IMG_BLACK: Image = raster::open("res/board_annotated_black.png").unwrap();
@@ -117,10 +112,8 @@ impl EventHandler for Handler {
 
 	//MARK: Message handler
 	fn message(&self, ctx: Context, msg: Message) {
-		let mut gs = GAMES.lock().unwrap();
-
-		if let Some(gm) = gs.get_mut(&msg.channel_id) {
-			if gm.running && (match gm.game.side_to_move() { Color::White => gm.white, Color::Black => gm.black }) == msg.author.id {
+		if let Some(mut gm) = GAMES.get_mut(&msg.channel_id) {
+			if gm.state == ChannelGameState::Running && (match gm.game.side_to_move() { Color::White => gm.white, Color::Black => gm.black }) == msg.author.id {
 				lazy_static! {
 					static ref MOVE_REGEX: Regex = Regex::new(r"^[KQBNR]?[a-h]?[1-8]?x?[a-h][1-8](?:=[BQRN])?[\+#]?( e.p.)?$").unwrap();
 					static ref CASTLE_REGEX: Regex = Regex::new("^O-O(-O)?$").unwrap();
@@ -136,11 +129,13 @@ impl EventHandler for Handler {
 							gm.game.make_move(mv);
 							gm.last_move = Some(mv);
 							gm.draw_offer = None;
-							post_board(&ctx, gm, &msg.channel(&ctx).unwrap().guild().unwrap().read()).unwrap();
-
-							let mut lock = USERS.lock().unwrap();
+							post_board(&ctx, &gm, &msg.channel(&ctx).unwrap().guild().unwrap().read()).unwrap();
 							
-							let mut author_stats = get_stats_for(&mut lock, msg.author.id);
+							USERS.alter(msg.author.id, |opt| match opt {
+								Some(stats) => Some(stats),
+								None=> Some(UserStats::default())
+							});
+							let mut author_stats = USERS.get_mut(&msg.author.id).unwrap();
 							author_stats.moves_made += 1;
 							if msg.content.contains('x') { // All capture moves must contain 'x', lest they be marked illegal
 								author_stats.pieces_captured += 1;
@@ -151,27 +146,48 @@ impl EventHandler for Handler {
 							std::mem::drop(author_stats);
 
 							if let Some(result) = gm.game.result() {
-								let mut white_stats = get_stats_for(&mut lock, gm.white);
+								USERS.alter(gm.white, |opt| match opt {
+									Some(stats) => Some(stats),
+									None=> Some(UserStats::default())
+								});
+								USERS.alter(gm.black, |opt| match opt {
+									Some(stats) => Some(stats),
+									None=> Some(UserStats::default())
+								});
+								let mut white_stats = USERS.get_mut(&gm.white).unwrap();
+								let mut black_stats = USERS.get_mut(&gm.black).unwrap();
 								match result {
-									GameResult::WhiteCheckmates => white_stats.won_checkmate += 1,
-									GameResult::BlackResigns => white_stats.won_default += 1,
-									GameResult::BlackCheckmates => white_stats.lost_checkmate += 1,
-									GameResult::WhiteResigns => white_stats.lost_resigned += 1,
-									GameResult::Stalemate => white_stats.drawn_stalemate += 1,
-									GameResult::DrawAccepted => white_stats.drawn_agreement += 1,
-									GameResult::DrawDeclared => white_stats.drawn_declared += 1,
+									GameResult::WhiteCheckmates => {
+										white_stats.won_checkmate += 1;
+										black_stats.lost_checkmate += 1;
+									},
+									GameResult::BlackResigns => {
+										white_stats.won_default += 1;
+										black_stats.lost_resigned += 1;
+									},
+									GameResult::BlackCheckmates => {
+										white_stats.lost_checkmate += 1;
+										black_stats.won_checkmate += 1;
+									},
+									GameResult::WhiteResigns => {
+										white_stats.lost_resigned += 1;
+										black_stats.won_default += 1;
+									},
+									GameResult::Stalemate => {
+										white_stats.drawn_stalemate += 1;
+										black_stats.drawn_stalemate += 1;
+									},
+									GameResult::DrawAccepted => {
+										white_stats.drawn_agreement += 1;
+										black_stats.drawn_agreement += 1;
+									},
+									GameResult::DrawDeclared => {
+										white_stats.drawn_declared += 1;
+										black_stats.drawn_declared += 1;
+									},
 								}
-								std::mem::drop(white_stats);
-								let mut black_stats = get_stats_for(&mut lock, gm.black);
-								match result {
-									GameResult::BlackCheckmates => black_stats.won_checkmate += 1,
-									GameResult::WhiteResigns => black_stats.won_default += 1,
-									GameResult::WhiteCheckmates => black_stats.lost_checkmate += 1,
-									GameResult::BlackResigns => black_stats.lost_resigned += 1,
-									GameResult::Stalemate => black_stats.drawn_stalemate += 1,
-									GameResult::DrawAccepted => black_stats.drawn_agreement += 1,
-									GameResult::DrawDeclared => black_stats.drawn_declared += 1,
-								}
+
+								gm.state = ChannelGameState::Inactive;
 							}
 						}
 					}
@@ -221,7 +237,7 @@ fn main() {
 }
 
 //MARK: Board
-fn post_board(ctx: &Context, gm: &mut ChannelGame, ch: &GuildChannel) -> CommandResult {
+fn post_board(ctx: &Context, gm: &ChannelGame, ch: &GuildChannel) -> CommandResult {
 	CONFIG.lazy_guild(ch.guild_id);
 	CONFIG.lazy_user(gm.black);
 
@@ -314,26 +330,26 @@ fn post_board(ctx: &Context, gm: &mut ChannelGame, ch: &GuildChannel) -> Command
 					GameResult::DrawAccepted => "; Drawn by agreement",
 					GameResult::DrawDeclared => "; Draw was declared"
 				}));
-				gm.running = false;
-				gm.finished = true;
 			} else if gm.game.can_declare_draw() {
 				c.content(format!("{} to play can declare draw", match gm.game.side_to_move() { Color::White => "White", Color::Black => "Black" }));
 			}
 			c
 		}
 	)?.id;
-	match &**CONFIG.guild_settings.read().unwrap().get(&ch.guild_id).unwrap().settings.get("deleteOld").unwrap() {
+	match &**CONFIG.guild_settings.read()?.get(&ch.guild_id).unwrap().settings.get("deleteOld").unwrap() {
 		"onNext" => {
-			if let Some(b) = gm.old_boards.pop_front() {
+			let mut lock = gm.old_boards.lock()?;
+			if let Some(b) = lock.pop_front() {
 				ch.delete_messages(ctx, vec![b])?;
 			}
-			gm.old_boards.push_back(sent);
+			lock.push_back(sent);
 		}
 		"onEnd" | "onRequest" => {
-			if gm.old_boards.len() >= 100 {
-				ch.delete_messages(ctx, vec![gm.old_boards.pop_front().unwrap()])?;
+			let mut lock = gm.old_boards.lock()?;
+			if lock.len() >= 100 {
+				ch.delete_messages(ctx, vec![lock.pop_front().unwrap()])?;
 			}
-			gm.old_boards.push_back(sent);
+			lock.push_back(sent);
 		}
 		_ => {} // Includes "off"
 	}
@@ -347,10 +363,6 @@ fn check_perm(msg: &Message, perm: &str) -> CommandResult {
 		Some((true, _)) => Ok(()),
 		_ => Err("Lack of required permissions".into())
 	}
-}
-
-fn get_stats_for<'a>(lock: &'a mut std::sync::MutexGuard<HashMap<UserId, UserStats>>, user: UserId) -> &'a mut UserStats {
-	lock.entry(user).or_insert_with(Default::default)
 }
 
 //MARK: Commands
@@ -369,9 +381,13 @@ fn main_help(
 #[command]
 fn play(ctx: &mut Context, msg: &Message) -> CommandResult {
 	check_perm(msg, "chess.games.allow")?;
-	let mut gs = GAMES.lock().unwrap();
+	GAMES.alter(msg.channel_id, |opt| match opt {
+		Some(gm) => Some(gm),
+		None => Some(ChannelGame::new()),
+	});
+	let mut gm = GAMES.get_mut(&msg.channel_id).unwrap();
 
-	if let Some(ChannelGame { finished: false, .. }) = gs.get(&msg.channel_id) {
+	if gm.state != ChannelGameState::Inactive {
 		msg.reply(ctx, "There's already a game going on here!")?;
 	} else {
 		let mut args = Args::new(&msg.content, &[Delimiter::Single(' ')]);
@@ -379,14 +395,15 @@ fn play(ctx: &mut Context, msg: &Message) -> CommandResult {
 		let pla = msg.author.id;
 		if let Ok(plb) = args.single::<String>() {
 			let idx = if plb.as_bytes()[2] == 33 { 3 } else { 2 };
-			let plb = UserId::from(plb[idx..plb.len()-1].parse::<u64>().unwrap());
+			let plb = UserId::from(plb[idx..plb.len()-1].parse::<u64>()?);
 			let worb = random::<bool>();
-			gs.insert(msg.channel_id, ChannelGame {
+			*gm = ChannelGame {
 				white: if worb { pla } else { plb },
 				black: if worb { plb } else { pla },
 				initiator: if worb { Color::White } else { Color::Black },
+				state: ChannelGameState::Requested,
 				..ChannelGame::new()
-			});
+			};
 			msg.reply(ctx, format!("I've set up your game. You're playing as {}", if worb { "White" } else { "Black" }))?;
 		} else {
 			msg.reply(ctx, "Who are you playing against? (`c>play @someone`)")?;
@@ -398,22 +415,14 @@ fn play(ctx: &mut Context, msg: &Message) -> CommandResult {
 
 #[command]
 fn accept(ctx: &mut Context, msg: &Message) -> CommandResult {
-	let mut gs = GAMES.lock().unwrap();
+	if let Some(mut gm) = GAMES.get_mut(&msg.channel_id) {
 
-	if let Some(ChannelGame { running: false, finished: false, ..}) = gs.get(&msg.channel_id) {
-		let mut gm = gs.get_mut(&msg.channel_id).unwrap();
-		if !gm.running {
-			if msg.author.id == gm.get_other() {
-				gm.running = true;
-				post_board(ctx, gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
-			} else {
-				msg.reply(ctx, "You weren't asked to play")?;
-			}
-		} else {
-			msg.reply(ctx, "The game has already started")?;
+		if gm.state == ChannelGameState::Requested && gm.get_other() == msg.author.id {
+			gm.state = ChannelGameState::Running;
+			post_board(ctx, &mut gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
 		}
 	} else {
-		msg.reply(ctx, "No one has started a game in this channel")?;
+		msg.reply(ctx, "You haven't been asked to play")?;
 	}
 
 	Ok(())
@@ -421,22 +430,13 @@ fn accept(ctx: &mut Context, msg: &Message) -> CommandResult {
 
 #[command]
 fn decline(ctx: &mut Context, msg: &Message) -> CommandResult {
-	let mut gs = GAMES.lock().unwrap();
-
-	if let Some(ChannelGame { running: false, finished: false, ..}) = gs.get(&msg.channel_id) {
-		let gm = gs.get(&msg.channel_id).unwrap();
-		if !gm.running {
-			if msg.author.id == gm.get_other() {
-				msg.channel_id.say(ctx, "The table is now open")?;
-				gs.remove(&msg.channel_id);
-			} else {
-				msg.reply(ctx, "You weren't asked to play")?;
-			}
-		} else {
-			msg.reply(ctx, "The game has already started")?;
+	if let Some(mut gm) = GAMES.get_mut(&msg.channel_id) {
+		if gm.state == ChannelGameState::Requested && gm.get_other() == msg.author.id {
+			gm.state = ChannelGameState::Inactive;
+			msg.reply(ctx, "The table is now open")?;
 		}
 	} else {
-		msg.reply(ctx, "No one has started a game in this channel")?;
+		msg.reply(ctx, "You haven't been asked to play")?;
 	}
 
 	Ok(())
@@ -444,22 +444,13 @@ fn decline(ctx: &mut Context, msg: &Message) -> CommandResult {
 
 #[command]
 fn cancel(ctx: &mut Context, msg: &Message) -> CommandResult {
-	let mut gs = GAMES.lock().unwrap();
-
-	if let Some(ChannelGame { running: false, finished: false, ..}) = gs.get(&msg.channel_id) {
-		let gm = gs.get(&msg.channel_id).unwrap();
-		if !gm.running {
-			if msg.author.id == gm.get_initiator() {
-				msg.channel_id.say(ctx, "The table is now open")?;
-				gs.remove(&msg.channel_id);
-			} else {
-				msg.reply(ctx, "You didn't start this game")?;
-			}
-		} else {
-			msg.reply(ctx, "The game has already started")?;
+	if let Some(mut gm) = GAMES.get_mut(&msg.channel_id) {
+		if gm.state == ChannelGameState::Requested && gm.get_initiator() == msg.author.id {
+			msg.channel_id.say(ctx, "The table is now open")?;
+			gm.state = ChannelGameState::Inactive;
 		}
 	} else {
-		msg.reply(ctx, "No one has started a game in this channel")?;
+		msg.reply(ctx, "You haven't started a game in this channel")?;
 	}
 
 	Ok(())
@@ -468,7 +459,11 @@ fn cancel(ctx: &mut Context, msg: &Message) -> CommandResult {
 #[command]
 #[aliases("stats", "stat")]
 fn statistics(ctx: &mut Context, msg: &Message) -> CommandResult {
-	let stats = *get_stats_for(&mut USERS.lock().unwrap(), msg.author.id);
+	USERS.alter(msg.author.id, |opt| match opt {
+		Some(stats) => Some(stats),
+		None=> Some(UserStats::default())
+	});
+	let stats = USERS.get(&msg.author.id).unwrap();
 
 	msg.channel(&ctx).unwrap().guild().unwrap().read().send_message(&ctx, |m| m.embed(|embed| {
 		embed.colour(serenity::utils::Colour::from_rgb(255, 255, 0));
@@ -512,17 +507,12 @@ fn statistics(ctx: &mut Context, msg: &Message) -> CommandResult {
 
 #[command]
 fn board(ctx: &mut Context, msg: &Message) -> CommandResult {
-	let mut gs = GAMES.lock().unwrap();
-
-	if !gs.contains_key(&msg.channel_id) {
-		msg.reply(ctx, "No one has started a game in this channel")?;
-	} else {
-		let mut gm = gs.get_mut(&msg.channel_id).unwrap();
-		if gm.running || gm.finished {
-			post_board(ctx, &mut gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
-		} else {
-			msg.reply(ctx, "The game hasn't been accepted yet")?;
+	if let Some(gm) = GAMES.get_mut(&msg.channel_id) {
+		if gm.state != ChannelGameState::Running {
+			post_board(ctx, &gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
 		}
+	} else {
+		msg.reply(ctx, "There is no game running")?;
 	}
 
 	Ok(())
@@ -530,25 +520,20 @@ fn board(ctx: &mut Context, msg: &Message) -> CommandResult {
 
 #[command]
 fn resign(ctx: &mut Context, msg: &Message) -> CommandResult {
-	let mut gs = GAMES.lock().unwrap();
-
-	if !gs.contains_key(&msg.channel_id) {
-		msg.reply(ctx, "No one has started a game in this channel")?;
-	} else {
-		let gm = gs.get_mut(&msg.channel_id).unwrap();
-		if gm.running {
+	if let Some(mut gm) = GAMES.get_mut(&msg.channel_id) {
+		if gm.state == ChannelGameState::Running {
 			if msg.author.id == gm.white {
 				gm.game.resign(Color::White);
-				post_board(ctx, gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
+				post_board(ctx, &gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
 			} else if msg.author.id == gm.black {
 				gm.game.resign(Color::Black);
-				post_board(ctx, gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
+				post_board(ctx, &gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
 			} else {
 				msg.reply(ctx, "You're not playing this game")?;
 			}
-		} else {
-			msg.reply(ctx, "The game hasn't been accepted yet")?;
 		}
+	} else {
+		msg.reply(ctx, "There is no game running")?;
 	}
 
 	Ok(())
@@ -556,24 +541,17 @@ fn resign(ctx: &mut Context, msg: &Message) -> CommandResult {
 
 #[command]
 fn draw(ctx: &mut Context, msg: &Message) -> CommandResult {
-	let mut gs = GAMES.lock().unwrap();
-
-	if !gs.contains_key(&msg.channel_id) {
-		msg.reply(ctx, "No one has started a game in this channel")?;
-	} else {
-		let mut gm = gs.get_mut(&msg.channel_id).unwrap();
-		if gm.running {
+	if let Some(mut gm) = GAMES.get_mut(&msg.channel_id) {
+		if gm.state == ChannelGameState::Running {
 			if msg.author.id == gm.white {
 				if gm.game.side_to_move() == Color::White && gm.game.can_declare_draw() {
 					gm.game.declare_draw();
-					gm.running = false;
-					gm.finished = true;
-					post_board(ctx, gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
+					gm.state = ChannelGameState::Inactive;
+					post_board(ctx, &gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
 				} else if gm.draw_offer == Some(Color::Black) {
 					gm.game.accept_draw();
-					gm.running = false;
-					gm.finished = true;
-					post_board(ctx, gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
+					gm.state = ChannelGameState::Inactive;
+					post_board(ctx, &gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
 				} else {
 					gm.draw_offer = Some(Color::White);
 					gm.game.offer_draw(Color::White);
@@ -582,14 +560,12 @@ fn draw(ctx: &mut Context, msg: &Message) -> CommandResult {
 			} else if msg.author.id == gm.black {
 				if gm.game.side_to_move() == Color::Black && gm.game.can_declare_draw() {
 					gm.game.declare_draw();
-					gm.running = false;
-					gm.finished = true;
-					post_board(ctx, gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
+					gm.state = ChannelGameState::Inactive;
+					post_board(ctx, &gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
 				} else if gm.draw_offer == Some(Color::White) {
 					gm.game.accept_draw();
-					gm.running = false;
-					gm.finished = true;
-					post_board(ctx, gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
+					gm.state = ChannelGameState::Inactive;
+					post_board(ctx, &gm, &msg.channel(&ctx).unwrap().guild().unwrap().read())?;
 				} else {
 					gm.draw_offer = Some(Color::Black);
 					gm.game.offer_draw(Color::White);
@@ -598,9 +574,9 @@ fn draw(ctx: &mut Context, msg: &Message) -> CommandResult {
 			} else {
 				msg.reply(ctx, "You're not playing this game")?;
 			}
-		} else {
-			msg.reply(ctx, "The game hasn't been accepted yet")?;
 		}
+	} else {
+		msg.reply(ctx, "There is no game running")?;
 	}
 
 	Ok(())

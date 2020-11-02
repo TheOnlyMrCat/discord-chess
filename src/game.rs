@@ -1,12 +1,12 @@
 use chess::*;
 use serenity::model::id::{UserId, MessageId};
 use std::collections::VecDeque;
+use std::sync::Mutex;
 
 pub struct ChannelGame {
 	pub game: Game,
-	pub running: bool,
-	pub finished: bool,
-	pub old_boards: VecDeque<MessageId>,
+	pub state: ChannelGameState,
+	pub old_boards: Mutex<VecDeque<MessageId>>,
 	pub white: UserId,
 	pub black: UserId,
 	pub initiator: Color,
@@ -18,9 +18,8 @@ impl ChannelGame {
 	pub fn new() -> ChannelGame {
 		ChannelGame {
 			game: Game::new(),
-			running: false,
-			finished: false,
-			old_boards: VecDeque::new(),
+			state: ChannelGameState::Inactive,
+			old_boards: Mutex::new(VecDeque::new()),
 			white: UserId::default(),
 			black: UserId::default(),
 			initiator: Color::White,
@@ -44,6 +43,13 @@ impl ChannelGame {
 			Color::Black => self.white
 		}
 	}
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ChannelGameState {
+	Inactive,
+	Requested,
+	Running,
 }
 
 pub enum MoveError {
